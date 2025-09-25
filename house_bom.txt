@@ -1,0 +1,9 @@
+BOM (Bill of Materials):
+House_Base: 1
+House_Door: 1
+House_Roof: 1
+House_Window_Back: 1
+House_Window_Front_-0.75: 1
+House_Window_Front_0.75: 1
+House_Window_Side_Left: 1
+House_Window_Side_Right: 1

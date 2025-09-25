@@ -1,0 +1,249 @@
+{% extends 'base.html' %}
+
+{% block title %}채팅 - ChatGPT 클론{% endblock %}
+
+{% block content %}
+<div class="sidebar">
+    <div class="sidebar-header">
+        <a href="{% url 'new_conversation' %}" class="new-chat-btn">
+            <i class="fas fa-plus"></i>
+            새 채팅
+        </a>
+    </div>
+
+    <div class="conversations">
+        {% for conversation in conversations %}
+            <a href="?conversation={{ conversation.id }}"
+               class="conversation-item {% if current_conversation.id == conversation.id %}active{% endif %}"
+               data-conversation-id="{{ conversation.id }}">
+                <i class="fas fa-message me-2"></i>
+                {{ conversation.title|truncatechars:30 }}
+            </a>
+        {% empty %}
+            <div class="text-center text-muted p-3">
+                <i class="fas fa-comments fa-2x mb-2"></i>
+                <p>아직 대화가 없습니다.<br>새 채팅을 시작해보세요!</p>
+            </div>
+        {% endfor %}
+    </div>
+
+    <div class="sidebar-footer">
+        <div class="d-flex align-items-center justify-content-between">
+            <div class="d-flex align-items-center">
+                <div class="user-avatar me-2">
+                    <i class="fas fa-user"></i>
+                </div>
+                <span>{{ request.user.username }}</span>
+            </div>
+            <a href="{% url 'logout' %}" class="text-decoration-none text-muted" title="로그아웃">
+                <i class="fas fa-sign-out-alt"></i>
+            </a>
+        </div>
+    </div>
+</div>
+
+<div class="main-content">
+    <div class="chat-messages" id="chat-messages">
+        {% if messages %}
+            {% for message in messages %}
+                <div class="message {{ message.role }}">
+                    <div class="message-content d-flex">
+                        <div class="message-avatar {{ message.role }}-avatar">
+                            {% if message.role == 'user' %}
+                                <i class="fas fa-user"></i>
+                            {% else %}
+                                <i class="fas fa-robot"></i>
+                            {% endif %}
+                        </div>
+                        <div class="message-text">
+                            {% if message.role == 'assistant' %}
+                                <div class="markdown-content">{{ message.content|safe }}</div>
+                            {% else %}
+                                {{ message.content }}
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            {% endfor %}
+        {% else %}
+            <div class="empty-state">
+                <div>
+                    <i class="fas fa-robot fa-4x mb-4 text-muted"></i>
+                    <h3>ChatGPT 클론에 오신 것을 환영합니다!</h3>
+                    <p class="text-muted">아래에 메시지를 입력하여 AI와 대화를 시작하세요.</p>
+                </div>
+            </div>
+        {% endif %}
+    </div>
+
+    <div class="chat-input-container">
+        <form class="chat-input-form" id="chat-form">
+            {% csrf_token %}
+            <textarea
+                class="chat-input"
+                id="message-input"
+                placeholder="메시지를 입력하세요..."
+                rows="1"
+                autofocus
+            ></textarea>
+            <button type="submit" class="send-btn" id="send-btn">
+                <i class="fas fa-paper-plane"></i>
+            </button>
+        </form>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const chatForm = document.getElementById('chat-form');
+    const messageInput = document.getElementById('message-input');
+    const sendBtn = document.getElementById('send-btn');
+    const chatMessages = document.getElementById('chat-messages');
+
+    let currentConversationId = {{ current_conversation.id|default:'null' }};
+    let isLoading = false;
+
+    // 자동 높이 조절
+    messageInput.addEventListener('input', function() {
+        this.style.height = '54px';
+        this.style.height = this.scrollHeight + 'px';
+
+        // 전송 버튼 활성화/비활성화
+        sendBtn.disabled = !this.value.trim();
+    });
+
+    // Enter 키로 전송 (Shift+Enter는 줄바꿈)
+    messageInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            if (!isLoading && this.value.trim()) {
+                chatForm.dispatchEvent(new Event('submit'));
+            }
+        }
+    });
+
+    // 폼 전송 처리
+    chatForm.addEventListener('submit', function(e) {
+        e.preventDefault();
+
+        const message = messageInput.value.trim();
+        if (!message || isLoading) return;
+
+        isLoading = true;
+        sendBtn.disabled = true;
+
+        // 사용자 메시지 즉시 표시
+        addMessage('user', message);
+        messageInput.value = '';
+        messageInput.style.height = '54px';
+
+        // 로딩 메시지 표시
+        const loadingDiv = addMessage('assistant', '<div class="loading"><div class="spinner"></div><span>생각 중...</span></div>');
+
+        // 스크롤을 아래로
+        scrollToBottom();
+
+        // API 호출
+        fetch('{% url "send_message" %}', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-CSRFToken': document.querySelector('[name=csrfmiddlewaretoken]').value
+            },
+            body: JSON.stringify({
+                message: message,
+                conversation_id: currentConversationId
+            })
+        })
+        .then(response => response.json())
+        .then(data => {
+            // 로딩 메시지 제거
+            loadingDiv.remove();
+
+            if (data.success) {
+                // 대화 ID 업데이트
+                currentConversationId = data.conversation_id;
+
+                // AI 응답 표시
+                const aiMessageDiv = addMessage('assistant', data.ai_message.content);
+                renderMarkdown(aiMessageDiv.querySelector('.message-text'));
+
+                // URL 업데이트 (새 대화인 경우)
+                if (window.location.search.indexOf('conversation=') === -1) {
+                    const newUrl = window.location.pathname + '?conversation=' + data.conversation_id;
+                    window.history.replaceState({}, '', newUrl);
+
+                    // 페이지 새로고침으로 사이드바 업데이트
+                    setTimeout(() => {
+                        window.location.reload();
+                    }, 1000);
+                }
+            } else {
+                addMessage('assistant', '죄송합니다. 오류가 발생했습니다: ' + (data.error || '알 수 없는 오류'));
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            loadingDiv.remove();
+            addMessage('assistant', '네트워크 오류가 발생했습니다. 다시 시도해주세요.');
+        })
+        .finally(() => {
+            isLoading = false;
+            sendBtn.disabled = false;
+            scrollToBottom();
+        });
+    });
+
+    function addMessage(role, content) {
+        // Empty state 제거
+        const emptyState = chatMessages.querySelector('.empty-state');
+        if (emptyState) {
+            emptyState.remove();
+        }
+
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${role}`;
+
+        const avatar = role === 'user' ? '<i class="fas fa-user"></i>' : '<i class="fas fa-robot"></i>';
+
+        messageDiv.innerHTML = `
+            <div class="message-content d-flex">
+                <div class="message-avatar ${role}-avatar">
+                    ${avatar}
+                </div>
+                <div class="message-text">${content}</div>
+            </div>
+        `;
+
+        chatMessages.appendChild(messageDiv);
+        return messageDiv;
+    }
+
+    function renderMarkdown(element) {
+        if (typeof marked !== 'undefined') {
+            const content = element.textContent;
+            element.innerHTML = marked.parse(content);
+
+            // 코드 하이라이팅
+            element.querySelectorAll('pre code').forEach(block => {
+                if (typeof Prism !== 'undefined') {
+                    Prism.highlightElement(block);
+                }
+            });
+        }
+    }
+
+    function scrollToBottom() {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    // 초기 스크롤
+    scrollToBottom();
+
+    // 기존 메시지의 마크다운 렌더링
+    document.querySelectorAll('.markdown-content').forEach(element => {
+        renderMarkdown(element);
+    });
+});
+</script>
+{% endblock %}
