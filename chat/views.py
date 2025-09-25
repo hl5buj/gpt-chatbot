@@ -3,7 +3,7 @@ from django.contrib.auth import login, authenticate
 from django.contrib.auth.decorators import login_required
 from django.contrib.auth.views import LoginView
 from django.contrib import messages
-from django.http import JsonResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
 import json
@@ -82,47 +82,60 @@ def send_message(request):
                 content=message_content
             )
 
-            # 대화 히스토리 구성
+            # 대화 히스토리 구성 (AI 응답 전까지만 포함)
             messages_history = []
-            for msg in conversation.messages.all():
+            for msg in conversation.messages.filter(id__lte=user_message.id):
                 messages_history.append({
                     "role": msg.role,
                     "content": msg.content
                 })
 
-            # OpenAI API 호출
-            openai.api_key = settings.OPENAI_API_KEY
-            client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
+            # 스트리밍 응답 생성기
+            def generate_response():
+                try:
+                    # OpenAI API 호출
+                    client = openai.OpenAI(api_key=settings.OPENAI_API_KEY)
 
-            response = client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=messages_history
-            )
+                    # 첫 번째 청크: 메타데이터 전송
+                    yield f"data: {json.dumps({'type': 'metadata', 'conversation_id': conversation.id, 'user_message': {'content': user_message.content, 'timestamp': user_message.created_at.isoformat()}})}\n\n"
 
-            ai_response = response.choices[0].message.content
+                    # OpenAI 스트리밍 응답
+                    stream = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=messages_history,
+                        stream=True
+                    )
 
-            # AI 응답 저장
-            ai_message = Message.objects.create(
-                conversation=conversation,
-                role='assistant',
-                content=ai_response
-            )
+                    full_response = ""
 
-            # 대화 업데이트 시간 갱신
-            conversation.save()
+                    for chunk in stream:
+                        if chunk.choices[0].delta.content is not None:
+                            content = chunk.choices[0].delta.content
+                            full_response += content
 
-            return JsonResponse({
-                'success': True,
-                'conversation_id': conversation.id,
-                'user_message': {
-                    'content': user_message.content,
-                    'timestamp': user_message.created_at.isoformat()
-                },
-                'ai_message': {
-                    'content': ai_message.content,
-                    'timestamp': ai_message.created_at.isoformat()
-                }
-            })
+                            # 각 청크를 클라이언트에 전송
+                            yield f"data: {json.dumps({'type': 'content', 'content': content})}\n\n"
+
+                    # AI 응답을 데이터베이스에 저장
+                    ai_message = Message.objects.create(
+                        conversation=conversation,
+                        role='assistant',
+                        content=full_response
+                    )
+
+                    # 대화 업데이트 시간 갱신
+                    conversation.save()
+
+                    # 완료 메시지 전송
+                    yield f"data: {json.dumps({'type': 'done', 'ai_message': {'content': full_response, 'timestamp': ai_message.created_at.isoformat()}})}\n\n"
+
+                except Exception as e:
+                    yield f"data: {json.dumps({'type': 'error', 'error': f'오류가 발생했습니다: {str(e)}'})}\n\n"
+
+            # Server-Sent Events 응답 반환
+            response = StreamingHttpResponse(generate_response(), content_type='text/plain')
+            response['Cache-Control'] = 'no-cache'
+            return response
 
         except Exception as e:
             return JsonResponse({'error': f'오류가 발생했습니다: {str(e)}'}, status=500)

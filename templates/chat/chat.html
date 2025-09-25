@@ -143,7 +143,7 @@ document.addEventListener('DOMContentLoaded', function() {
         // 스크롤을 아래로
         scrollToBottom();
 
-        // API 호출
+        // 스트리밍 API 호출
         fetch('{% url "send_message" %}', {
             method: 'POST',
             headers: {
@@ -155,35 +155,97 @@ document.addEventListener('DOMContentLoaded', function() {
                 conversation_id: currentConversationId
             })
         })
-        .then(response => response.json())
-        .then(data => {
-            // 로딩 메시지 제거
-            loadingDiv.remove();
-
-            if (data.success) {
-                // 대화 ID 업데이트
-                currentConversationId = data.conversation_id;
-
-                // AI 응답 표시
-                const aiMessageDiv = addMessage('assistant', data.ai_message.content);
-                renderMarkdown(aiMessageDiv.querySelector('.message-text'));
-
-                // URL 업데이트 (새 대화인 경우)
-                if (window.location.search.indexOf('conversation=') === -1) {
-                    const newUrl = window.location.pathname + '?conversation=' + data.conversation_id;
-                    window.history.replaceState({}, '', newUrl);
-
-                    // 페이지 새로고침으로 사이드바 업데이트
-                    setTimeout(() => {
-                        window.location.reload();
-                    }, 1000);
-                }
-            } else {
-                addMessage('assistant', '죄송합니다. 오류가 발생했습니다: ' + (data.error || '알 수 없는 오류'));
+        .then(response => {
+            if (!response.ok) {
+                throw new Error('Network response was not ok');
             }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+
+            let aiMessageDiv = null;
+            let aiResponseContent = '';
+            let buffer = '';
+
+            function readStream() {
+                return reader.read().then(({ done, value }) => {
+                    if (done) {
+                        isLoading = false;
+                        sendBtn.disabled = false;
+                        scrollToBottom();
+                        return;
+                    }
+
+                    // 청크 데이터를 디코딩하고 버퍼에 추가
+                    buffer += decoder.decode(value, { stream: true });
+
+                    // 완전한 라인들을 처리
+                    const lines = buffer.split('\n\n');
+                    buffer = lines.pop(); // 마지막 불완전한 라인은 다시 버퍼에 저장
+
+                    lines.forEach(line => {
+                        if (line.startsWith('data: ')) {
+                            try {
+                                const data = JSON.parse(line.slice(6)); // 'data: ' 제거
+
+                                if (data.type === 'metadata') {
+                                    // 로딩 메시지 제거 및 메타데이터 처리
+                                    loadingDiv.remove();
+                                    currentConversationId = data.conversation_id;
+
+                                    // AI 응답용 빈 메시지 div 생성
+                                    aiMessageDiv = addMessage('assistant', '');
+                                    scrollToBottom();
+
+                                } else if (data.type === 'content') {
+                                    // 실시간으로 텍스트 추가
+                                    if (aiMessageDiv) {
+                                        aiResponseContent += data.content;
+                                        const messageText = aiMessageDiv.querySelector('.message-text');
+                                        messageText.textContent = aiResponseContent;
+                                        scrollToBottom();
+                                    }
+
+                                } else if (data.type === 'done') {
+                                    // 스트리밍 완료 - 마크다운 렌더링
+                                    if (aiMessageDiv) {
+                                        const messageText = aiMessageDiv.querySelector('.message-text');
+                                        renderMarkdown(messageText);
+                                    }
+
+                                    // URL 업데이트 (새 대화인 경우)
+                                    if (window.location.search.indexOf('conversation=') === -1) {
+                                        const newUrl = window.location.pathname + '?conversation=' + currentConversationId;
+                                        window.history.replaceState({}, '', newUrl);
+
+                                        // 페이지 새로고침으로 사이드바 업데이트
+                                        setTimeout(() => {
+                                            window.location.reload();
+                                        }, 1000);
+                                    }
+
+                                } else if (data.type === 'error') {
+                                    // 오류 처리
+                                    loadingDiv.remove();
+                                    addMessage('assistant', '죄송합니다. 오류가 발생했습니다: ' + data.error);
+                                    return;
+                                }
+
+                            } catch (e) {
+                                console.error('Error parsing stream data:', e);
+                            }
+                        }
+                    });
+
+                    // 다음 청크 읽기
+                    return readStream();
+                });
+            }
+
+            return readStream();
         })
         .catch(error => {
-            console.error('Error:', error);
+            console.error('Streaming error:', error);
             loadingDiv.remove();
             addMessage('assistant', '네트워크 오류가 발생했습니다. 다시 시도해주세요.');
         })
